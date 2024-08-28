@@ -1914,15 +1914,15 @@ def main():
             # Assign Role
             dcnm_inv.assign_role()
 
-            # Step 7
-            # Config-save all switches
-            if module.params["save"]:
-                dcnm_inv.config_save()
+        # Step 7
+        # Config-save all switches
+        if module.params["save"]:
+            dcnm_inv.config_save()
 
-            # Step 8
-            # Config-deploy all switches
-            if module.params["deploy"]:
-                dcnm_inv.config_deploy()
+        # Step 8
+        # Config-deploy all switches
+        if module.params["deploy"]:
+            dcnm_inv.config_deploy()
 
     module.exit_json(**dcnm_inv.result)
 

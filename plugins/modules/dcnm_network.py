@@ -501,6 +501,10 @@ class DcnmNetwork:
             "GET_NET_ATTACH": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/{}/networks/attachments?network-names={}",
             "GET_NET_ID": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/{}/netinfo",
             "GET_NET": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/{}/networks",
+            "BULK_NET": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/bulk-create/networks",
+            "MULTI_ATTACH": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/networks/multiattach",
+            "BULK_ATTACH_IMPORT": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/bulk-import/networks/attachments?fabric-name={}",
+            "SW_ATTACH": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/networks/attachments",
             "GET_NET_NAME": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/{}/networks/{}",
             "GET_VLAN": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/resource-manager/vlan/{}?vlanUsageType=TOP_DOWN_NETWORK_VLAN",
         },
@@ -510,6 +514,7 @@ class DcnmNetwork:
         self.module = module
         self.params = module.params
         self.fabric = module.params["fabric"]
+        self.deploy = module.params["deploy"]
         self.config = copy.deepcopy(module.params.get("config"))
         self.check_mode = False
         self.have_create = []
@@ -540,6 +545,7 @@ class DcnmNetwork:
         self.query = []
         self.dcnm_version = dcnm_version_supported(self.module)
         self.inventory_data = get_fabric_inventory_details(self.module, self.fabric)
+        self.inventory_data_sn = get_fabric_inventory_details(self.module, self.fabric, "serialNumber")
         self.ip_sn, self.hn_sn = get_ip_sn_dict(self.inventory_data)
         self.ip_fab, self.sn_fab = get_ip_sn_fabric_dict(self.inventory_data)
         self.fabric_det = get_fabric_details(module, self.fabric)
@@ -2427,6 +2433,7 @@ class DcnmNetwork:
     def push_to_remote(self, is_rollback=False):
 
         path = self.paths["GET_NET"].format(self.fabric)
+        chunk_size = 5000
 
         method = "PUT"
         if self.diff_create_update:
@@ -2450,27 +2457,53 @@ class DcnmNetwork:
         method = "POST"
         if self.diff_detach:
             detach_path = path + "/attachments"
+            bulk_import_path = self.paths["BULK_ATTACH_IMPORT"].format(self.fabric)
+            bulk_csv_header = "fabric,networkname,islanattached,vlan,serialnumber_1,switchname_1,freeformconfig_1,interfaces,deviceSupportSVI_1,disableIpRedirects_1"
 
             # Update the fabric name to specific fabric which the switches are part of.
             self.update_ms_fabric(self.diff_detach)
+
+            attachment_list = []
+            for net in self.diff_detach:
+                for item in net["lanAttachList"]:
+                    sn = item["serialNumber"]
+                    csv_entry = f'{self.fabric},{net["networkName"]},false,,{sn},{self.inventory_data_sn[sn]["hostName"]},,"{item["switchPorts"]}",,'
+                    attachment_list.append(csv_entry)
+                    
+            index = 0
+            while(True):
+                chunk = [bulk_csv_header] + attachment_list[index: index + chunk_size]
+                # for debug
+                with open(f"/tmp/{index}.csv", "w") as f:
+                    f.write("\n".join(chunk))
+
+                resp = dcnm_send(
+                    self.module, method, bulk_import_path, data="\n".join(chunk), data_type="text"
+                )
+                self.result["response"].append(resp)
+                if resp["RETURN_CODE"] != 200:
+                    self.failure(resp)
+                index = index + chunk_size
+                if index >= len(attachment_list):
+                    break
 
             for d_a in self.diff_detach:
                 for v_a in d_a["lanAttachList"]:
                     del v_a["is_deploy"]
 
-            resp = dcnm_send(
-                self.module, method, detach_path, json.dumps(self.diff_detach)
-            )
-            self.result["response"].append(resp)
-            fail, self.result["changed"] = self.handle_response(resp, "attach")
-            if fail:
-                if is_rollback:
-                    self.failed_to_rollback = True
-                    return
-                self.failure(resp)
+            # resp = dcnm_send(
+            #     self.module, method, detach_path, json.dumps(self.diff_detach)
+            # )
+            # self.result["response"].append(resp)
+            # fail, self.result["changed"] = self.handle_response(resp, "attach")
+            # if fail:
+            #     if is_rollback:
+            #         self.failed_to_rollback = True
+            #         return
+            #     self.failure(resp)
 
         method = "POST"
-        if self.diff_undeploy:
+        if self.diff_undeploy and self.deploy:
             deploy_path = path + "/deployments"
             resp = dcnm_send(
                 self.module, method, deploy_path, json.dumps(self.diff_undeploy)
@@ -2495,7 +2528,7 @@ class DcnmNetwork:
 
         method = "DELETE"
         del_failure = ""
-        if self.diff_delete and self.wait_for_del_ready():
+        if self.diff_delete and self.deploy and self.wait_for_del_ready():
             for net, state in self.diff_delete.items():
                 if state == "OUT-OF-SYNC":
                     del_failure += net + ","
@@ -2519,6 +2552,7 @@ class DcnmNetwork:
             self.failure(fail_msg)
 
         if self.diff_create:
+            bulk_list = []
             for net in self.diff_create:
                 json_to_dict = json.loads(net["networkTemplateConfig"])
                 vlanId = json_to_dict.get("vlanId", "")
@@ -2568,53 +2602,124 @@ class DcnmNetwork:
                     t_conf.update(VLAN_NETFLOW_MONITOR=json_to_dict.get("VLAN_NETFLOW_MONITOR", ""))
 
                 net.update({"networkTemplateConfig": json.dumps(t_conf)})
+                net["fabric"] = self.fabric
+                bulk_list.append(net)
 
-                method = "POST"
-                resp = dcnm_send(self.module, method, path, json.dumps(net))
-                self.result["response"].append(resp)
-                fail, self.result["changed"] = self.handle_response(resp, "create")
-                if fail:
-                    if is_rollback:
-                        self.failed_to_rollback = True
-                        return
-                    self.failure(resp)
-
-        method = "POST"
-        if self.diff_attach:
-            attach_path = path + "/attachments"
-
-            # Update the fabric name to specific fabric which the switches are part of.
-            self.update_ms_fabric(self.diff_attach)
-
-            for d_a in self.diff_attach:
-                for v_a in d_a["lanAttachList"]:
-                    del v_a["is_deploy"]
-
-            for attempt in range(0, 50):
-                resp = dcnm_send(
-                    self.module, method, attach_path, json.dumps(self.diff_attach)
-                )
-                update_in_progress = False
-                for key in resp["DATA"].keys():
-                    if re.search(
-                        r"Failed.*Please try after some time", str(resp["DATA"][key])
-                    ):
-                        update_in_progress = True
-                if update_in_progress:
-                    time.sleep(1)
-                    continue
-
-                break
+            method = "POST"
+            bulk_path = self.paths["BULK_NET"]
+            resp = dcnm_send(self.module, method, bulk_path, json.dumps(bulk_list))
             self.result["response"].append(resp)
-            fail, self.result["changed"] = self.handle_response(resp, "attach")
-            # If we get here and an update_in_progress is True then
-            # not all of the attachments were successful which represents a
-            # failure condition.
-            if fail or update_in_progress:
+            fail, self.result["changed"] = self.handle_response(resp, "create")
+            if fail:
                 if is_rollback:
                     self.failed_to_rollback = True
                     return
                 self.failure(resp)
+
+        method = "POST"
+        if self.diff_attach:
+            # attach_path = path + "/attachments"
+            bulk_import_path = self.paths["BULK_ATTACH_IMPORT"].format(self.fabric)
+            bulk_csv_header = "fabric,networkname,islanattached,vlan,serialnumber_1,switchname_1,freeformconfig_1,interfaces,deviceSupportSVI_1,disableIpRedirects_1"
+            attachment_list = []
+            for net in self.diff_attach:
+                for item in net["lanAttachList"]:
+                    sn = item["serialNumber"]
+                    csv_entry = f'{self.fabric},{net["networkName"]},true,,{sn},{self.inventory_data_sn[sn]["hostName"]},,"{item["switchPorts"]}",,'
+                    attachment_list.append(csv_entry)
+                    
+            index = 0
+            while(True):
+                chunk = [bulk_csv_header] + attachment_list[index: index + chunk_size]
+                # for debug
+                with open(f"/tmp/{index}.csv", "w") as f:
+                    f.write("\n".join(chunk))
+
+                resp = dcnm_send(
+                    self.module, method, bulk_import_path, data="\n".join(chunk), data_type="text"
+                )
+                self.result["response"].append(resp)
+                if resp["RETURN_CODE"] != 200:
+                    self.failure(resp)
+                index = index + chunk_size
+                if index >= len(attachment_list):
+                    break
+
+            # network_list = []
+            # switch_list = set()
+            # attachment_list = []
+            # for attach in self.diff_attach: 
+            #     network_list.append(attach["networkName"])
+            #     for item in attach["lanAttachList"]:
+            #         switch_list.add(item["serialNumber"])
+            #         sn = item["serialNumber"]
+            #         item_attach = {
+            #                 "networkName": attach["networkName"],
+            #                 "switchName": self.inventory_data_sn[sn]["hostName"],
+            #                 "switchIP": self.inventory_data_sn[sn]["ipAddress"],
+            #                 "switchSN": sn,
+            #                 "peerSwitchSN": None,
+            #                 "peerSwitchName": None,
+            #                 "ports": item["switchPorts"],
+            #                 "torSwitches": None,
+            #                 "allSwitches":[ self.inventory_data_sn[sn]["hostName"] ]
+            #                 }
+            #         attachment_list.append(item_attach)
+
+                
+
+            # Update the fabric name to specific fabric which the switches are part of.
+            # for d_a in self.diff_attach:
+            #     for v_a in d_a["lanAttachList"]:
+            #         del v_a["is_deploy"]
+            # switch attachment first
+            # path = self.paths["SW_ATTACH"]
+            # method = "POST"
+            # payload = {
+            #         "switches": list(switch_list),
+            #         "networks": network_list
+            #         }
+            # resp = dcnm_send(
+            #     self.module, method, path, json.dumps(payload)
+            # )
+            # self.result["response"].append(resp)
+            # if res["RETURN_CODE"] != 200:
+            #     self.failure(resp)
+            # multi_attach_path = self.paths["MULTI_ATTACH"]
+            # method = "POST"
+            #
+            # resp = dcnm_send(
+            #     self.module, method, multi_attach_path, json.dumps(attachment_list)
+            # )
+            # self.result["response"].append(resp)
+            # if resp["RETURN_CODE"] != 200:
+            #     self.failure(resp)
+
+            # for attempt in range(0, 50):
+            #     resp = dcnm_send(
+            #         self.module, method, attach_path, json.dumps(self.diff_attach)
+            #     )
+            #     update_in_progress = False
+            #     for key in resp["DATA"].keys():
+            #         if re.search(
+            #             r"Failed.*Please try after some time", str(resp["DATA"][key])
+            #         ):
+            #             update_in_progress = True
+            #     if update_in_progress:
+            #         time.sleep(1)
+            #         continue
+            #
+            #     break
+            # self.result["response"].append(resp)
+            # fail, self.result["changed"] = self.handle_response(resp, "attach")
+            # # If we get here and an update_in_progress is True then
+            # # not all of the attachments were successful which represents a
+            # # failure condition.
+            # if fail or update_in_progress:
+            #     if is_rollback:
+            #         self.failed_to_rollback = True
+            #         return
+            #     self.failure(resp)
 
         method = "POST"
         if self.diff_deploy:
@@ -3152,6 +3257,7 @@ def main():
     element_spec = dict(
         fabric=dict(required=True, type="str"),
         config=dict(required=False, type="list", elements="dict"),
+        deploy=dict(type="bool", default=True),
         state=dict(
             default="merged",
             choices=["merged", "replaced", "deleted", "overridden", "query"],

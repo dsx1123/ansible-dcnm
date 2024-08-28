@@ -188,7 +188,7 @@ def validate_list_of_dicts(param_list, spec, module=None):
     return normalized, invalid_params
 
 
-def get_fabric_inventory_details(module, fabric):
+def get_fabric_inventory_details(module, fabric, dict_key="ipAddress"):
 
     inventory_data = {}
     rc = False
@@ -230,8 +230,8 @@ def get_fabric_inventory_details(module, fabric):
 
         for device_data in response.get("DATA"):
 
-            if device_data.get("ipAddress", "") != "":
-                key = device_data.get("ipAddress")
+            if device_data.get(dict_key, "") != "":
+                key = device_data.get(dict_key)
             else:
                 key = device_data.get("logicalName")
             inventory_data[key] = device_data
