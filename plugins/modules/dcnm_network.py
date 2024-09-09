@@ -503,7 +503,7 @@ class DcnmNetwork:
             "GET_NET": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/{}/networks",
             "BULK_NET": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/bulk-create/networks",
             "MULTI_ATTACH": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/networks/multiattach",
-            "BULK_ATTACH_IMPORT": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/bulk-import/networks/attachments?fabric-name={}",
+            "BULK_ATTACH_IMPORT": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/v2/bulk-import/networks/attachments?fabric-name={}",
             "SW_ATTACH": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/networks/attachments",
             "GET_NET_NAME": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/{}/networks/{}",
             "GET_VLAN": "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/resource-manager/vlan/{}?vlanUsageType=TOP_DOWN_NETWORK_VLAN",
@@ -2433,7 +2433,7 @@ class DcnmNetwork:
     def push_to_remote(self, is_rollback=False):
 
         path = self.paths["GET_NET"].format(self.fabric)
-        chunk_size = 5000
+        chunk_size = 100000
 
         method = "PUT"
         if self.diff_create_update:
