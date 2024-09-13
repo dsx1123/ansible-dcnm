@@ -666,11 +666,13 @@ class DcnmNetwork:
 
                                 if sorted(h_sw_ports) != sorted(w_sw_ports):
                                     atch_sw_ports = list(
-                                        set(w_sw_ports) - set(h_sw_ports)
+                                        # set(w_sw_ports) - set(h_sw_ports)
+                                        set(h_sw_ports).union(set(w_sw_ports))
                                     )
 
                                     # Adding some logic which is needed for replace and override.
                                     if replace:
+                                        atch_sw_ports = w_sw_ports
                                         dtach_sw_ports = list(
                                             set(h_sw_ports) - set(w_sw_ports)
                                         )
